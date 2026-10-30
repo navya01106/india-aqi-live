@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>India Air Quality Live</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<style>
+  :root { --bg:#f6f7f9; --card:#ffffff; --text:#1c2230; --muted:#667085; --line:#e4e7ec; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#12151c; --card:#1b1f29; --text:#eef0f4; --muted:#9aa3b2; --line:#2b3140; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, Arial, sans-serif; background:var(--bg); color:var(--text); }
+  header { padding:14px 18px; display:flex; justify-content:space-between; flex-wrap:wrap; gap:6px; }
+  h1 { margin:0; font-size:1.25rem; }
+  #status { color:var(--muted); font-size:.85rem; align-self:center; }
+  #alert { display:none; margin:0 18px 10px; padding:10px 14px; border-radius:8px; background:#e03131; color:#fff; }
+  main { display:grid; grid-template-columns: 1fr 320px; gap:14px; padding:0 18px 18px; }
+  #map { height:70vh; min-height:380px; border-radius:10px; border:1px solid var(--line); }
+  #list { height:70vh; min-height:380px; overflow-y:auto; background:var(--card); border:1px solid var(--line); border-radius:10px; }
+  .row { display:flex; align-items:center; gap:10px; padding:10px 12px; border-bottom:1px solid var(--line); cursor:pointer; }
+  .row:hover { background:var(--bg); }
+  .badge { min-width:46px; text-align:center; padding:4px 6px; border-radius:6px; color:#fff; font-weight:700; }
+  .row small { color:var(--muted); display:block; }
+  #legend { padding:0 18px 18px; display:flex; flex-wrap:wrap; gap:10px; font-size:.8rem; color:var(--muted); }
+  #legend span::before { content:""; display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:5px; background:var(--c); }
+  .note { padding:0 18px 20px; font-size:.78rem; color:var(--muted); }
+  @media (max-width: 800px) { main { grid-template-columns: 1fr; } #list { height:auto; max-height:50vh; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>India Air Quality, Live</h1>
+  <div id="status">Loading...</div>
+</header>
+<div id="alert"></div>
+<main>
+  <div id="map"></div>
+  <div id="list"></div>
+</main>
+<div id="legend"></div>
+<p class="note">Data: Open-Meteo Air Quality API (modelled estimates, US AQI scale). Not the official CPCB index. Not medical advice.</p>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+// ---------- 1. Data we start with ----------
+const CITIES = [
+  { name:"Delhi", lat:28.61, lon:77.21 },        { name:"Mumbai", lat:19.08, lon:72.88 },
+  { name:"Kolkata", lat:22.57, lon:88.36 },      { name:"Chennai", lat:13.08, lon:80.27 },
+  { name:"Bengaluru", lat:12.97, lon:77.59 },    { name:"Hyderabad", lat:17.39, lon:78.49 },
+  { name:"Ahmedabad", lat:23.02, lon:72.57 },    { name:"Pune", lat:18.52, lon:73.86 },
+  { name:"Jaipur", lat:26.91, lon:75.79 },       { name:"Lucknow", lat:26.85, lon:80.95 },
+  { name:"Kanpur", lat:26.45, lon:80.35 },       { name:"Patna", lat:25.59, lon:85.14 },
+  { name:"Bhopal", lat:23.26, lon:77.41 },       { name:"Chandigarh", lat:30.73, lon:76.78 },
+  { name:"Guwahati", lat:26.14, lon:91.74 },     { name:"Amritsar", lat:31.63, lon:74.87 },
+  { name:"Ghaziabad", lat:28.67, lon:77.45 },    { name:"Varanasi", lat:25.32, lon:82.97 },
+  { name:"Thiruvananthapuram", lat:8.52, lon:76.94 }, { name:"Nagpur", lat:21.15, lon:79.09 }
+];
+
+// AQI categories (US scale): color + a short health tip for each
+const LEVELS = [
+  { max:50,   label:"Good",                color:"#2f9e44", tip:"Air is clean. Enjoy outdoor activities." },
+  { max:100,  label:"Moderate",            color:"#f2c400", tip:"Fine for most. Very sensitive people may feel mild effects." },
+  { max:150,  label:"Unhealthy (sensitive)", color:"#f08c00", tip:"Children, elderly and people with asthma should limit long outdoor effort." },
+  { max:200,  label:"Unhealthy",           color:"#e03131", tip:"Reduce outdoor exercise. Consider an N95 mask outside." },
+  { max:300,  label:"Very unhealthy",      color:"#9c36b5", tip:"Stay indoors where possible. Use an N95 mask if you go out." },
+  { max:9999, label:"Hazardous",           color:"#7d1d2f", tip:"Avoid going outside. Keep windows closed." }
+];
+const levelFor = aqi => LEVELS.find(l => aqi <= l.max);
+
+// ---------- 2. Build the map ----------
+const map = L.map("map").setView([22.5, 79], 5);
+L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+  maxZoom: 12, attribution: "&copy; OpenStreetMap contributors"
+}).addTo(map);
+const markerLayer = L.layerGroup().addTo(map);
+
+// ---------- 3. Fetch (one API call for all cities) ----------
+async function load() {
+  const lats = CITIES.map(c => c.lat).join(",");
+  const lons = CITIES.map(c => c.lon).join(",");
+  const url = "https://air-quality-api.open-meteo.com/v1/air-quality?latitude=" + lats +
+              "&longitude=" + lons + "&current=us_aqi,pm2_5,pm10";
+  try {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const data = await res.json();             // an array: one entry per city, same order
+    data.forEach((d, i) => {
+      CITIES[i].aqi  = d.current.us_aqi;
+      CITIES[i].pm25 = d.current.pm2_5;
+      CITIES[i].pm10 = d.current.pm10;
+    });
+    render();
+    document.getElementById("status").textContent =
+      "Updated " + new Date().toLocaleTimeString();
+  } catch (err) {
+    document.getElementById("status").textContent = "Could not load data (" + err.message + ")";
+  }
+}
+
+// ---------- 4. Draw markers, list and alert ----------
+function render() {
+  markerLayer.clearLayers();
+  const list = document.getElementById("list");
+  list.innerHTML = "";
+  const valid = CITIES.filter(c => c.aqi != null).sort((a, b) => b.aqi - a.aqi);
+
+  valid.forEach(c => {
+    const lvl = levelFor(c.aqi);
+    const marker = L.circleMarker([c.lat, c.lon], {
+      radius: Math.min(30, 8 + c.aqi / 10),     // worse air = bigger circle
+      color: lvl.color, fillColor: lvl.color, fillOpacity: 0.6
+    }).addTo(markerLayer);
+    marker.bindPopup(
+      "<b>" + c.name + "</b><br>AQI " + Math.round(c.aqi) + " (" + lvl.label + ")<br>" +
+      "PM2.5: " + c.pm25 + " | PM10: " + c.pm10 + "<br><i>" + lvl.tip + "</i>"
+    );
+
+    const row = document.createElement("div");
+    row.className = "row";
+    row.innerHTML = '<span class="badge" style="background:' + lvl.color + '">' + Math.round(c.aqi) +
+                    '</span><div>' + c.name + '<small>' + lvl.label + '</small></div>';
+    row.onclick = () => { map.setView([c.lat, c.lon], 8); marker.openPopup(); };
+    list.appendChild(row);
+  });
+
+  // Alert banner if the worst city is Unhealthy (AQI above 150)
+  const box = document.getElementById("alert");
+  if (valid.length && valid[0].aqi > 150) {
+    box.style.display = "block";
+    box.textContent = "Alert: " + valid[0].name + " has " + levelFor(valid[0].aqi).label.toLowerCase() +
+                      " air (AQI " + Math.round(valid[0].aqi) + "). " + levelFor(valid[0].aqi).tip;
+  } else {
+    box.style.display = "none";
+  }
+}
+
+// ---------- 5. Legend, first load, then polling ----------
+document.getElementById("legend").innerHTML = LEVELS.map(l =>
+  '<span style="--c:' + l.color + '">' + l.label + '</span>').join("");
+
+load();
+setInterval(load, 10 * 60 * 1000);   // refresh every 10 minutes
+</script>
+</body>
+</html>
